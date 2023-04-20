@@ -1,0 +1,80 @@
+name: Build and Test
+
+on: [push]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Lint code
+      uses: golangci/golangci-lint-action@v3
+      with:
+        # Optional: version of golangci-lint to use in form of v1.2 or v1.2.3 or `latest` to use the latest version
+        version: latest
+        # Optional: working directory, useful for monorepos
+        # working-directory: somedir
+        # Optional: golangci-lint command line arguments.
+        # args: --issues-exit-code=0
+        # Optional: show only new issues if it's a pull request. The default value is `false`.
+        # only-new-issues: true
+        # Optional: if set to true then the action will use pre-installed Go.
+        # skip-go-installation: true
+        # Optional: if set to true then the action don't cache or restore ~/go/pkg.
+        # skip-pkg-cache: true
+        # Optional: if set to true then the action don't cache or restore ~/.cache/go-build.
+        # skip-build-cache: true
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 'stable'
+
+    - name: Build provider
+      uses: goreleaser/goreleaser-action@v4
+      with:
+        distribution: goreleaser
+        version: latest
+        args: build --snapshot
+
+    - name: Configure FusionAuth kickstart
+      working-directory: tests
+      run: |
+        curl -o docker-compose.yml https://raw.githubusercontent.com/FusionAuth/fusionauth-containers/master/docker/fusionauth/docker-compose.yml
+        curl -o .env https://raw.githubusercontent.com/FusionAuth/fusionauth-containers/master/docker/fusionauth/.env
+        awk '
+          /SEARCH_TYPE: elasticsearch/ {print; print "      FUSIONAUTH_APP_KICKSTART_FILE: ${FUSIONAUTH_APP_KICKSTART_FILE}"; next}
+          /fusionauth_config:\/usr\/local\/fusionauth\/config/ {print; print "      - ./kickstart:/usr/local/fusionauth/kickstart"; next}
+          {print}
+        ' docker-compose.yml > docker-compose.tmp && mv docker-compose.tmp docker-compose.yml
+        echo "FUSIONAUTH_APP_KICKSTART_FILE=/usr/local/fusionauth/kickstart/kickstart.json" >> .env
+
+    - name: Start FusionAuth
+      working-directory: tests
+      run: |
+        docker-compose up -d
+        while ! curl -s http://localhost:9011; do sleep 1; done
+
+    - name: Install Terraform
+      uses: hashicorp/setup-terraform@v2
+
+    - name: Install provider
+      run: |
+        mkdir -p $RUNNER_TEMP/registry.terraform.io/gpsinsight/fusionauth/1.0.0/linux_amd64/
+        cp $GITHUB_WORKSPACE/dist/terraform-provider-fusionauth_linux_amd64_v1/* $RUNNER_TEMP/registry.terraform.io/gpsinsight/fusionauth/1.0.0/linux_amd64/
+
+    - name: Initialize Terraform
+      working-directory: tests
+      run: |
+        terraform init -plugin-dir=$RUNNER_TEMP
+
+    - name: Apply Terraform
+      working-directory: tests
+      run: |
+        terraform apply --auto-approve
+
+    - name: Run tests
+      run: go test
